@@ -1931,11 +1931,12 @@ Usage: .mdgc <message>
         const activity: any = {
             name: config.name || 'Visual Studio Code', // Default name if empty
             type: config.type || 'PLAYING',
-            details: config.details,
-            state: config.state,
             assets: {},
             buttons: [],
         };
+
+        if (config.details) activity.details = config.details;
+        if (config.state) activity.state = config.state;
 
         if (config.applicationId) activity.applicationId = config.applicationId;
         
@@ -2004,9 +2005,9 @@ Usage: .mdgc <message>
       }
   });
 
-  const upload = multer({ storage: multer.memoryStorage() });
+  const rpcUpload = multer({ storage: multer.memoryStorage() });
   
-  app.post('/api/rpc/upload-image', upload.single('image'), async (req, res) => {
+  app.post('/api/rpc/upload-image', rpcUpload.single('image'), async (req, res) => {
       const { token, channelId } = req.body;
       const file = req.file;
 
