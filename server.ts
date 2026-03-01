@@ -46,8 +46,9 @@ const rpcSettings = new Map<string, RpcConfig>();
 // Map<token, Map<userId | 'self', Set<emoji>>>
 const autoReactRules = new Map<string, Map<string, Set<string>>>();
 
-let activeBackground: string | null = null;
-let helpBackground: string | null = null;
+let userBackgrounds: Record<string, string> = {};
+let userHelpBackgrounds: Record<string, string> = {};
+let tokenOwners: Record<string, string> = {};
 
 // --- Persistence ---
 
@@ -83,8 +84,9 @@ async function saveAutoReactRules(token: string) {
 
 async function saveGlobalSettings() {
   await supabase.from('global_settings').upsert([
-    { key: 'activeBackground', value: { data: activeBackground } },
-    { key: 'helpBackground', value: { data: helpBackground } }
+    { key: 'userBackgrounds', value: userBackgrounds },
+    { key: 'userHelpBackgrounds', value: userHelpBackgrounds },
+    { key: 'tokenOwners', value: tokenOwners }
   ]);
 }
 
@@ -131,8 +133,11 @@ async function loadState() {
     const { data: globalData } = await supabase.from('global_settings').select('*');
     if (globalData) {
       for (const g of globalData) {
-        if (g.key === 'activeBackground') activeBackground = g.value.data;
-        if (g.key === 'helpBackground') helpBackground = g.value.data;
+        if (g.key === 'activeBackground') userBackgrounds['legacy'] = g.value.data;
+        if (g.key === 'helpBackground') userHelpBackgrounds['legacy'] = g.value.data;
+        if (g.key === 'userBackgrounds') userBackgrounds = g.value || {};
+        if (g.key === 'userHelpBackgrounds') userHelpBackgrounds = g.value || {};
+        if (g.key === 'tokenOwners') tokenOwners = g.value || {};
       }
     }
     console.log('State loaded successfully');
@@ -143,7 +148,7 @@ async function loadState() {
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   console.log('Starting server initialization...');
   
@@ -172,6 +177,14 @@ async function startServer() {
 
   // --- API Routes ---
 
+  const getOwnerToken = (req: express.Request) => {
+    const auth = req.headers.authorization;
+    if (auth && auth.startsWith('Bearer ')) {
+      return auth.substring(7);
+    }
+    return null;
+  };
+
   // 1. Login / Verify Token
   app.post('/api/auth/login', async (req, res) => {
     let { token } = req.body;
@@ -199,6 +212,8 @@ async function startServer() {
       };
       
       sessions.set(token, session);
+      tokenOwners[token] = token;
+      saveGlobalSettings().catch(console.error);
       saveSession(token).catch(console.error);
       res.json({ success: true, session });
     } catch (error: any) {
@@ -885,16 +900,18 @@ Avatar: ${user.displayAvatarURL()}
           try {
             await message.delete().catch(() => {});
             let buffer;
+            const owner = tokenOwners[token] || token;
+            const bgToUse = userHelpBackgrounds[owner] || userHelpBackgrounds['legacy'] || null;
             if (args.length > 0) {
                 const catNum = parseInt(args[0]);
                 if (!isNaN(catNum) && catNum >= 1 && catNum <= 5) {
-                    buffer = await buildCategoryImage(helpBackground, catNum);
+                    buffer = await buildCategoryImage(bgToUse, catNum);
                 } else {
                     // Invalid category, send overview
-                    buffer = await buildOverviewImage(helpBackground);
+                    buffer = await buildOverviewImage(bgToUse);
                 }
             } else {
-                buffer = await buildOverviewImage(helpBackground);
+                buffer = await buildOverviewImage(bgToUse);
             }
             
             if (buffer) {
@@ -1801,6 +1818,8 @@ Usage: .mdgc <message>
   app.post('/api/tokens/upload', upload.single('file'), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const ownerToken = getOwnerToken(req);
+      if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
 
       const content = req.file.buffer.toString('utf-8');
       const tokens = content.split(/\r?\n/).map(t => t.trim()).filter(t => t.length > 0);
@@ -1822,6 +1841,7 @@ Usage: .mdgc <message>
             logs: [`Loaded via file import`]
           };
           sessions.set(token, session);
+          tokenOwners[token] = ownerToken;
           saveSession(token).catch(console.error);
           results.push({ token: '***', status: 'success', user: client.user?.tag });
         } catch (e) {
@@ -1829,6 +1849,7 @@ Usage: .mdgc <message>
         }
       }
       
+      saveGlobalSettings().catch(console.error);
       res.json({ 
         message: `Processed ${tokens.length} tokens`, 
         results 
@@ -1839,7 +1860,9 @@ Usage: .mdgc <message>
   });
 
   app.get('/api/tokens', (req, res) => {
-    const safeSessions = Array.from(sessions.values()).map(s => ({
+    const ownerToken = getOwnerToken(req);
+    const userSessions = Array.from(sessions.values()).filter(s => tokenOwners[s.token] === ownerToken || s.token === ownerToken);
+    const safeSessions = userSessions.map(s => ({
       ...s,
       token: s.token // In a real app, mask this. For this "selfbot dashboard", user needs to see it or we keep it internal.
     }));
@@ -1847,27 +1870,41 @@ Usage: .mdgc <message>
   });
 
   app.delete('/api/tokens', (req, res) => {
-    sessions.clear();
-    activeClients.forEach(c => c.destroy());
-    activeClients.clear();
-    supabase.from('sessions').delete().neq('id', '_').then(); // Clear all
-    res.json({ message: 'All tokens cleared' });
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
+
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken && t !== ownerToken);
+    
+    for (const t of userTokens) {
+      sessions.delete(t);
+      const client = activeClients.get(t);
+      if (client) {
+        client.destroy();
+        activeClients.delete(t);
+      }
+      delete tokenOwners[t];
+      supabase.from('sessions').delete().eq('id', t).then();
+    }
+    saveGlobalSettings().catch(console.error);
+    res.json({ message: 'User tokens cleared' });
   });
 
   // 3. Actions (Real Implementation)
   
   app.post('/api/actions/join-vc', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { channelId } = req.body;
     if (!channelId) return res.status(400).json({ error: 'Channel ID required' });
 
     let count = 0;
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const channel = await client.channels.fetch(channelId);
         if (channel && channel.isVoice()) {
-           // Selfbot v13 joinVoiceChannel is different or might rely on @discordjs/voice
-           // However, discord.js-selfbot-v13 usually supports client.joinVoiceChannel or similar
-           // Actually, for selfbots, it's often:
            // @ts-ignore
            await client.joinVoiceChannel(channel);
            addLog(token, `Joined VC: ${channel.name}`);
@@ -1881,13 +1918,15 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/autoskull', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { ownerId } = req.body;
-    // This is a "fun" feature request - let's interpret it as reacting with skull to the user's last message
-    // or sending a skull DM.
     
-    // Implementation: Send a skull DM to the ownerId
     let count = 0;
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const user = await client.users.fetch(ownerId);
         if (user) {
@@ -1903,14 +1942,16 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/mass-dm', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { message } = req.body;
-    // VERY RISKY - Selfbots get banned for this. We will implement it but it's dangerous.
-    // We will just DM the first 5 open DMs to avoid instant ban in this demo
     
     let count = 0;
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
-        // Get recent DMs
         const channels = client.channels.cache.filter(c => c.type === 'DM').first(5);
         for (const channel of channels) {
            if (channel.isText()) {
@@ -1927,11 +1968,16 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/friend-request', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { userId } = req.body;
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const user = await client.users.fetch(userId);
-        // @ts-ignore - selfbot specific method
+        // @ts-ignore
         await client.users.addFriend(userId); 
         addLog(token, `Sent friend request to ${user.tag}`);
       } catch (e) {
@@ -1943,35 +1989,46 @@ Usage: .mdgc <message>
 
   // Background
   app.post('/api/settings/background', (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { image } = req.body;
-    activeBackground = image;
+    userBackgrounds[ownerToken] = image;
     saveGlobalSettings().catch(console.error);
     res.json({ success: true });
   });
 
   app.get('/api/settings/background', (req, res) => {
-    res.json({ image: activeBackground });
+    const ownerToken = getOwnerToken(req);
+    res.json({ image: ownerToken ? (userBackgrounds[ownerToken] || userBackgrounds['legacy'] || null) : null });
   });
 
   app.post('/api/settings/help-background', (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { image } = req.body;
-    if (image) helpBackground = image;
+    if (image) userHelpBackgrounds[ownerToken] = image;
     saveGlobalSettings().catch(console.error);
     res.json({ success: true });
   });
 
   app.get('/api/settings/help-background', (req, res) => {
-    res.json({ image: helpBackground });
+    const ownerToken = getOwnerToken(req);
+    res.json({ image: ownerToken ? (userHelpBackgrounds[ownerToken] || userHelpBackgrounds['legacy'] || null) : null });
   });
 
   app.post('/api/actions/spam', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { channelId, message, count } = req.body;
     if (!channelId || !message || !count) return res.status(400).json({ error: 'Missing fields' });
 
     let successCount = 0;
     const promises = [];
 
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       promises.push((async () => {
         try {
           const channel = await client.channels.fetch(channelId);
@@ -1992,10 +2049,15 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/nuke', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { guildId } = req.body;
     if (!guildId) return res.status(400).json({ error: 'Guild ID required' });
 
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const guild = await client.guilds.fetch(guildId);
         if (guild) {
@@ -2011,10 +2073,15 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/mass-ban', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { guildId } = req.body;
     if (!guildId) return res.status(400).json({ error: 'Guild ID required' });
 
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const guild = await client.guilds.fetch(guildId);
         if (guild) {
@@ -2032,10 +2099,15 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/rename-channels', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { guildId, name } = req.body;
     if (!guildId || !name) return res.status(400).json({ error: 'Missing fields' });
 
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const guild = await client.guilds.fetch(guildId);
         if (guild) {
@@ -2050,10 +2122,15 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/actions/delete-roles', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { guildId } = req.body;
     if (!guildId) return res.status(400).json({ error: 'Guild ID required' });
 
-    for (const [token, client] of activeClients.entries()) {
+    const userTokens = Array.from(sessions.keys()).filter(t => tokenOwners[t] === ownerToken || t === ownerToken);
+    for (const token of userTokens) {
+      const client = activeClients.get(token);
+      if (!client) continue;
       try {
         const guild = await client.guilds.fetch(guildId);
         if (guild) {
@@ -2072,8 +2149,13 @@ Usage: .mdgc <message>
   // --- RPC Endpoints ---
 
   app.post('/api/rpc/update', async (req, res) => {
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
     const { token, config } = req.body;
     if (!token || !config) return res.status(400).json({ error: 'Missing token or config' });
+    if (tokenOwners[token] !== ownerToken && token !== ownerToken) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     const client = activeClients.get(token);
     if (!client || !client.isReady()) {
@@ -2150,7 +2232,12 @@ Usage: .mdgc <message>
   });
 
   app.post('/api/rpc/clear', async (req, res) => {
+      const ownerToken = getOwnerToken(req);
+      if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
       const { token } = req.body;
+      if (tokenOwners[token] !== ownerToken && token !== ownerToken) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
       const client = activeClients.get(token);
       if (client && client.isReady()) {
           client.user?.setActivity(null);
@@ -2165,11 +2252,16 @@ Usage: .mdgc <message>
   const rpcUpload = multer({ storage: multer.memoryStorage() });
   
   app.post('/api/rpc/upload-image', rpcUpload.single('image'), async (req, res) => {
+      const ownerToken = getOwnerToken(req);
+      if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
       const { token, channelId } = req.body;
       const file = req.file;
 
       if (!token || !file || !channelId) {
           return res.status(400).json({ error: 'Missing token, file, or channelId' });
+      }
+      if (tokenOwners[token] !== ownerToken && token !== ownerToken) {
+        return res.status(403).json({ error: 'Forbidden' });
       }
 
       const client = activeClients.get(token);
@@ -2209,9 +2301,15 @@ Usage: .mdgc <message>
   });
 
   app.get('/api/admin/all-sessions', (req, res) => {
-    // In a real app, verify the requester is the admin. 
-    // Here we just return all sessions (historical tracking would need DB, this is in-memory)
-    // We will map active sessions.
+    const ownerToken = getOwnerToken(req);
+    if (!ownerToken) return res.status(401).json({ error: 'Unauthorized' });
+    
+    // Check if the requester is the admin (yannaaax)
+    const adminSession = sessions.get(ownerToken);
+    if (!adminSession || adminSession.username !== 'yannaaax') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const allSessions = Array.from(sessions.values()).map(s => ({
         username: s.username,
         id: s.id,
