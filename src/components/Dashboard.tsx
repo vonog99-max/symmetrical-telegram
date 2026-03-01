@@ -169,9 +169,14 @@ export default function Dashboard({ onLogout }: DashboardProps) {
   }, [activeTab, isAdmin]);
 
   const fetchAdminData = async () => {
-    const res = await fetch(`${API_BASE}/api/admin/all-sessions`);
-    const data = await res.json();
-    setAdminSessions(data);
+    const token = localStorage.getItem('mainToken');
+    const res = await fetch(`${API_BASE}/api/admin/all-sessions`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    });
+    if (res.ok) {
+        const data = await res.json();
+        setAdminSessions(data);
+    }
   };
 
   return (
