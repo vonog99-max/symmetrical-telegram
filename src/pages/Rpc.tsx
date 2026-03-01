@@ -20,6 +20,11 @@ interface RpcConfig {
 
 const API_BASE = '';
 
+const getAuthHeader = () => {
+  const token = localStorage.getItem('mainToken');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+};
+
 export default function Rpc() {
     const [token, setToken] = useState('');
     const [config, setConfig] = useState<RpcConfig>({
@@ -46,7 +51,7 @@ export default function Rpc() {
         try {
             const res = await fetch(`${API_BASE}/api/rpc/update`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
                 body: JSON.stringify({ 
                     token, 
                     config
@@ -67,7 +72,7 @@ export default function Rpc() {
         try {
             await fetch(`${API_BASE}/api/rpc/clear`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
                 body: JSON.stringify({ token })
             });
             setStatus('RPC Cleared');
@@ -92,6 +97,7 @@ export default function Rpc() {
         try {
             const res = await fetch(`${API_BASE}/api/rpc/upload-image`, {
                 method: 'POST',
+                headers: { ...getAuthHeader() },
                 body: formData
             });
             const data = await res.json();
