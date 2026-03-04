@@ -55,7 +55,7 @@ const deletedMessages = new Map<string, Map<string, any>>(); // token -> channel
 
 let activeBackground: string | null = null;
 const helpBackgrounds = new Map<string, string>();
-let cdnBotToken: string | null = 'MTQ3ODM2NzE0MDQ3Mjk1MDgzNA.GT76oZ.pO5gcVIUeVkH5Ru6lmKFtmb7ON2HZWGhBQ-tx4';
+let cdnBotToken: string | null = 'MTQ3ODM2NzE0MDQ3Mjk1MDgzNA.GBDJL2.qilaeZy3R4i1s2XNEYUV6Pw-84IOriB_vQscLw';
 let cdnChannelId: string | null = '1476576159947821210';
 
 // --- Persistence ---
