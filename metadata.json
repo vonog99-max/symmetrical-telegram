@@ -1,0 +1,9 @@
+{
+  "name": "Copy of Copy of Remix: Remix: Remix: Remix: Remix: Remix: Remix: release",
+  "description": "A comprehensive dashboard for managing Discord accounts, RPC settings, and automation tools.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
