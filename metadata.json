@@ -1,0 +1,9 @@
+{
+  "name": "Yuri - Discord Self-bot Dashboard",
+  "description": "A futuristic dark fantasy Discord self-bot dashboard. Features include RPC management, nitro sniping, mass actions, hosting, status rotator, and voice channel automation.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
