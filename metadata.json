@@ -1,9 +1,0 @@
-{
-  "name": "Remix: Yuri Discord RPC \u0026 Automation Dashboard",
-  "description": "A comprehensive dashboard for managing Discord accounts, RPC settings, and automation tools, featuring portrait RPC and platform spoofing.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone",
-    "geolocation"
-  ]
-}
